@@ -1,6 +1,6 @@
 # Lotus Offer Generator - Web
 
-Lotus Pro Claims Mix & Match Engine — web version.
+Lotus Offer Generator — web version.
 
 ## Login
 

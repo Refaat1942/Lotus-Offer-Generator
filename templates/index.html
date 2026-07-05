@@ -3,13 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lotus Pro Claims - Mix & Match Engine</title>
+    <title>Lotus Offer Generator - Mix & Match Engine</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
+    <div class="page-decor" aria-hidden="true">
+        <div class="decor-shape decor-1"></div>
+        <div class="decor-shape decor-2"></div>
+        <div class="decor-shape decor-3"></div>
+        <div class="decor-star decor-4">✦</div>
+        <div class="decor-star decor-5">★</div>
+        <div class="decor-star decor-6">✦</div>
+        <span class="sparkle sparkle-d1"></span>
+        <span class="sparkle sparkle-d2"></span>
+        <span class="sparkle sparkle-d3"></span>
+        <span class="sparkle sparkle-d4"></span>
+        <span class="sparkle sparkle-d5"></span>
+        <span class="sparkle sparkle-d6"></span>
+    </div>
+
     <nav class="navbar animate-fade-in">
         <div class="nav-brand">
             <div class="nav-logo" id="navLogo">
@@ -19,7 +34,7 @@
                 </svg>
             </div>
             <div class="nav-title">
-                <h1>Lotus Pro Claims</h1>
+                <h1>Lotus Offer Generator</h1>
                 <span>Mix & Match Engine v{{ version }}</span>
             </div>
         </div>

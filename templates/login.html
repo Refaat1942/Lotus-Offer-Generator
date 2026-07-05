@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - Lotus Pro Claims</title>
+    <title>Login - Lotus Offer Generator</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -11,23 +11,54 @@
 </head>
 <body class="login-page">
     <div class="login-bg-shapes">
-        <div class="shape shape-1"></div>
-        <div class="shape shape-2"></div>
-        <div class="shape shape-3"></div>
+        <div class="shape shape-circle shape-1"></div>
+        <div class="shape shape-circle shape-2"></div>
+        <div class="shape shape-circle shape-3"></div>
+        <div class="shape shape-ring shape-4"></div>
+        <div class="shape shape-ring shape-5"></div>
+        <div class="shape shape-blob shape-6"></div>
+        <div class="shape shape-blob shape-7"></div>
+        <div class="shape shape-star shape-8">✦</div>
+        <div class="shape shape-star shape-9">✦</div>
+        <div class="shape shape-star shape-10">★</div>
+        <div class="shape shape-dot shape-11"></div>
+        <div class="shape shape-dot shape-12"></div>
+        <div class="shape shape-dot shape-13"></div>
+        <div class="shape shape-dot shape-14"></div>
+        <div class="shape shape-pill shape-15"></div>
+        <div class="shape shape-pill shape-16"></div>
+    </div>
+
+    <div class="sparkles-layer" aria-hidden="true">
+        <span class="sparkle sparkle-1"></span>
+        <span class="sparkle sparkle-2"></span>
+        <span class="sparkle sparkle-3"></span>
+        <span class="sparkle sparkle-4"></span>
+        <span class="sparkle sparkle-5"></span>
+        <span class="sparkle sparkle-6"></span>
+        <span class="sparkle sparkle-7"></span>
+        <span class="sparkle sparkle-8"></span>
+        <span class="sparkle sparkle-9"></span>
+        <span class="sparkle sparkle-10"></span>
+        <span class="sparkle sparkle-11"></span>
+        <span class="sparkle sparkle-12"></span>
     </div>
 
     <div class="login-container animate-fade-in">
         <div class="login-card animate-slide-up">
             <div class="login-header">
-                <div class="logo-placeholder" id="loginLogo">
-                    <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <circle cx="32" cy="32" r="28" stroke="currentColor" stroke-width="2"/>
-                        <path d="M32 12 C32 12 20 24 20 36 C20 44 25 48 32 48 C39 48 44 44 44 36 C44 24 32 12 32 12Z" fill="currentColor" opacity="0.3"/>
-                        <path d="M32 20 L32 44" stroke="currentColor" stroke-width="2"/>
-                        <path d="M26 32 L38 32" stroke="currentColor" stroke-width="2"/>
-                    </svg>
+                <div class="logo-showcase">
+                    <div class="logo-glow-ring"></div>
+                    <div class="logo-placeholder" id="loginLogo">
+                        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <circle cx="32" cy="32" r="28" stroke="currentColor" stroke-width="2"/>
+                            <path d="M32 12 C32 12 20 24 20 36 C20 44 25 48 32 48 C39 48 44 44 44 36 C44 24 32 12 32 12Z" fill="currentColor" opacity="0.3"/>
+                            <path d="M32 20 L32 44" stroke="currentColor" stroke-width="2"/>
+                            <path d="M26 32 L38 32" stroke="currentColor" stroke-width="2"/>
+                        </svg>
+                    </div>
                 </div>
-                <h1>Lotus Pro Claims</h1>
+                <h1>Lotus Offer Generator</h1>
                 <p class="subtitle">Mix & Match Engine</p>
                 <span class="version-badge">v{{ version }}</span>
             </div>
