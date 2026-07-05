@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Lotus Pro Claims</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="login-page">
+    <div class="login-bg-shapes">
+        <div class="shape shape-1"></div>
+        <div class="shape shape-2"></div>
+        <div class="shape shape-3"></div>
+    </div>
+
+    <div class="login-container animate-fade-in">
+        <div class="login-card animate-slide-up">
+            <div class="login-header">
+                <div class="logo-placeholder" id="loginLogo">
+                    <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="32" cy="32" r="28" stroke="currentColor" stroke-width="2"/>
+                        <path d="M32 12 C32 12 20 24 20 36 C20 44 25 48 32 48 C39 48 44 44 44 36 C44 24 32 12 32 12Z" fill="currentColor" opacity="0.3"/>
+                        <path d="M32 20 L32 44" stroke="currentColor" stroke-width="2"/>
+                        <path d="M26 32 L38 32" stroke="currentColor" stroke-width="2"/>
+                    </svg>
+                </div>
+                <h1>Lotus Pro Claims</h1>
+                <p class="subtitle">Mix & Match Engine</p>
+                <span class="version-badge">v{{ version }}</span>
+            </div>
+
+            {% if error %}
+            <div class="alert alert-error animate-shake">{{ error }}</div>
+            {% endif %}
+
+            <form method="POST" class="login-form">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" placeholder="Enter username" required autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" placeholder="Enter password" required autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">
+                    <span>Sign In</span>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M5 12h14M12 5l7 7-7 7"/>
+                    </svg>
+                </button>
+            </form>
+
+            <p class="login-footer">Lotus Pharma &copy; {{ version }}</p>
+        </div>
+    </div>
+
+    <script>
+        fetch('/api/logo').then(r => {
+            if (r.ok) {
+                const img = document.createElement('img');
+                img.src = '/api/logo?' + Date.now();
+                img.alt = 'Lotus Logo';
+                img.className = 'login-logo-img';
+                document.getElementById('loginLogo').innerHTML = '';
+                document.getElementById('loginLogo').appendChild(img);
+            }
+        }).catch(() => {});
+    </script>
+</body>
+</html>

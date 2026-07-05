@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.venv/
+venv/
+env/
+data/
+static/uploads/logo.png
+*.lic
+*.xlsx
+*.xls
+*.csv
+.DS_Store
+Thumbs.db

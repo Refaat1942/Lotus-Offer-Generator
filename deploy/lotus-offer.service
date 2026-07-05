@@ -1,0 +1,18 @@
+[Unit]
+Description=Lotus Offer Generator Web App
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/lotus-offer-generator
+Environment=PORT=17800
+Environment=ADMIN_USER=admin
+Environment=ADMIN_PASS=admin
+Environment=SECRET_KEY=lotus-pharma-secret-change-me
+ExecStart=/opt/lotus-offer-generator/venv/bin/gunicorn --bind 0.0.0.0:17800 --workers 2 --timeout 120 app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
