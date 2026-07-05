@@ -9,7 +9,6 @@ from flask import (
     send_file, session, url_for
 )
 from werkzeug.security import check_password_hash, generate_password_hash
-from werkzeug.utils import secure_filename
 import io
 
 from offer_engine import (
@@ -145,12 +144,21 @@ def upload_file():
         upload_path = _session_file_path('upload')
         with open(upload_path, 'wb') as f:
             f.write(file_bytes)
-        session['uploaded_filename'] = secure_filename(file.filename)
+        orig_name = file.filename or 'upload.xlsx'
+        session['uploaded_filename'] = orig_name
+        session['uploaded_ext'] = os.path.splitext(orig_name)[1].lower() or '.xlsx'
+        session.modified = True
+
+        row_count = len(df.dropna(how='all'))
+        has_mfg = 'Manufacturer Name' in df.columns
         return jsonify({
             'success': True,
             'companies': companies,
-            'filename': file.filename,
-            'row_count': len(df)
+            'filename': orig_name,
+            'row_count': row_count,
+            'company_count': len(companies),
+            'has_manufacturer_column': has_mfg,
+            'columns_found': list(df.columns[:20])
         })
     except Exception as e:
         return jsonify({'error': f'Could not read file: {str(e)}'}), 400
@@ -182,7 +190,9 @@ def process():
     try:
         with open(upload_path, 'rb') as f:
             file_bytes = f.read()
-        filename = session.get('uploaded_filename', 'data.xlsx')
+        filename = session.get('uploaded_filename') or 'data.xlsx'
+        if not os.path.splitext(filename)[1]:
+            filename = 'data' + session.get('uploaded_ext', '.xlsx')
         df_original = read_sales_file(file_bytes, filename)
 
         if use_date_filter and start_date and end_date:

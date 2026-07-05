@@ -1,5 +1,6 @@
-"""Lotus Pro Claims - Mix & Match Engine (Core Logic)"""
+"""Lotus Offer Generator - Mix & Match Engine (Core Logic)"""
 import io
+import os
 import random
 from datetime import datetime
 
@@ -50,15 +51,92 @@ def parse_offer_string(offer_str):
         return None
 
 
+def _normalize_columns(df):
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _find_header_row(raw_df):
+    markers = {'Manufacturer Name', 'Date', 'Site', 'Trnsctn number', 'Gross Sales EGP'}
+    for i in range(min(25, len(raw_df))):
+        row_vals = {str(v).strip() for v in raw_df.iloc[i].values if pd.notna(v) and str(v).strip()}
+        if 'Manufacturer Name' in row_vals or len(markers.intersection(row_vals)) >= 2:
+            if 'Manufacturer Name' in row_vals or ('Date' in row_vals and 'Site' in row_vals):
+                return i
+    return 0
+
+
+def _read_excel_bytes(file_bytes):
+    buf = io.BytesIO(file_bytes)
+    try:
+        df = pd.read_excel(buf, engine='openpyxl')
+        df = _normalize_columns(df)
+        df = df.dropna(how='all')
+        if len(df) > 0 and 'Manufacturer Name' in df.columns:
+            return df
+    except Exception:
+        pass
+
+    buf.seek(0)
+    raw = pd.read_excel(buf, header=None, engine='openpyxl')
+    header_idx = _find_header_row(raw)
+    buf.seek(0)
+    df = pd.read_excel(buf, header=header_idx, engine='openpyxl')
+    df = _normalize_columns(df)
+    df = df.dropna(how='all')
+    if len(df) > 0 and 'Manufacturer Name' in df.columns:
+        return df
+
+    buf.seek(0)
+    xl = pd.ExcelFile(buf, engine='openpyxl')
+    best = df
+    best_score = len(df) if 'Manufacturer Name' in df.columns else 0
+    for sheet in xl.sheet_names:
+        try:
+            raw_s = pd.read_excel(xl, sheet_name=sheet, header=None)
+            h_idx = _find_header_row(raw_s)
+            temp = pd.read_excel(xl, sheet_name=sheet, header=h_idx)
+            temp = _normalize_columns(temp).dropna(how='all')
+            score = len(temp) if 'Manufacturer Name' in temp.columns else len(temp) // 2
+            if score > best_score:
+                best = temp
+                best_score = score
+        except Exception:
+            continue
+    return best
+
+
 def read_sales_file(file_bytes, filename):
-    if filename.endswith(('.xlsx', '.xls')):
-        df = pd.read_excel(io.BytesIO(file_bytes))
+    ext = os.path.splitext((filename or '').lower())[1]
+
+    if ext in ('.xlsx', '.xls', '.xlsm', '.xlsb'):
+        if ext == '.xls':
+            df = pd.read_excel(io.BytesIO(file_bytes))
+        else:
+            df = _read_excel_bytes(file_bytes)
     else:
         try:
             df = pd.read_csv(io.BytesIO(file_bytes), encoding='utf-8-sig')
         except UnicodeDecodeError:
             df = pd.read_csv(io.BytesIO(file_bytes), encoding='cp1256')
-    df.columns = df.columns.str.strip()
+
+    df = _normalize_columns(df)
+    df = df.dropna(how='all')
+
+    col_fixes = {
+        'manufacturer name': 'Manufacturer Name',
+        'manufacturer': 'Manufacturer Name',
+        'trnsctn: sales sun': 'Trnsctn: Sales SUn',
+        'transact. type': 'Transact. type',
+    }
+    rename_map = {}
+    for col in df.columns:
+        key = col.strip().lower()
+        if key in col_fixes:
+            rename_map[col] = col_fixes[key]
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
     return df
 
 
