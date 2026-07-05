@@ -115,7 +115,7 @@
 
             tr.innerHTML = `
                 <td><strong>${comp}</strong></td>
-                <td><select class="form-select offer-select" data-company="${comp}">${options}</select></td>
+                <td><select class="form-select form-select-lg offer-select" data-company="${comp}">${options}</select></td>
             `;
             tbody.appendChild(tr);
         });
@@ -240,7 +240,8 @@
                     $('#targetDiscount').value = '';
                     $('#branch').selectedIndex = 0;
                     $('#filterByDate').checked = false;
-                    $('#dateRangeGroup').classList.add('hidden');
+                    const dateGroup = $('#dateRangeGroup');
+                    dateGroup.classList.add('hidden');
                     $('#startDate').disabled = true;
                     $('#endDate').disabled = true;
                     $('#mappingEmpty').classList.remove('hidden');
