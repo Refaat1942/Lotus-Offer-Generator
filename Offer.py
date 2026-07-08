@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 from openpyxl.styles import Font
 import os
 import sys
-import random
 import hashlib
 import uuid
 
@@ -386,31 +385,37 @@ class LotusOfferGenerator:
         true_unprocessed = []
         accumulated_discount = 0.0
 
-        used_signatures = set()
-        valid_pos_list = ['101', '102', '103', '104']
+        def bundle_shares_same_register(bundle):
+            if not bundle:
+                return False
+            lead = bundle[0]
+            reg_date = lead['Date']
+            reg_site = lead['Site']
+            reg_pos = str(lead.get('POS no.', '101')).strip()
+            return all(
+                item['Date'] == reg_date
+                and item['Site'] == reg_site
+                and str(item.get('POS no.', '101')).strip() == reg_pos
+                for item in bundle
+            )
 
-        def get_safe_pos_and_time(b_date, b_site):
-            while True:
-                curr_pos = random.choice(valid_pos_list)
-                hour = random.randint(9, 23)
-                minute = random.randint(0, 59)
-                second = random.randint(0, 59)
-                
-                time_obj = datetime.strptime(f"{hour}:{minute}:{second}", "%H:%M:%S")
-                curr_time = time_obj.strftime('%I:%M:%S %p')
-                
-                if (b_date, b_site, curr_pos, curr_time) not in used_signatures:
-                    used_signatures.add((b_date, b_site, curr_pos, curr_time))
-                    return curr_pos, curr_time
+        def unified_receipt_fields(bundle):
+            lead = bundle[0]
+            reg_date = lead['Date']
+            reg_site = lead['Site']
+            reg_pos = str(lead.get('POS no.', '101')).strip()
+            reg_time = str(lead.get('Time', '12:00:00 PM')).strip()
+            reg_t_num = str(lead.get('Trnsctn number', '')).strip()
 
-        def resolve_pos_and_time(b_date, b_site, preferred_pos, preferred_time):
-            pos = str(preferred_pos or '101').strip()
-            time_val = str(preferred_time or '12:00:00 PM').strip()
-            signature = (b_date, b_site, pos, time_val)
-            if signature not in used_signatures:
-                used_signatures.add(signature)
-                return pos, time_val
-            return get_safe_pos_and_time(b_date, b_site)
+            if bundle_shares_same_register(bundle):
+                merged = any(
+                    str(item.get('Trnsctn number', '')).strip() != reg_t_num
+                    for item in bundle[1:]
+                )
+                return reg_date, reg_site, reg_pos, reg_time, reg_t_num, merged
+
+            new_t_num = str(get_new_t_num(reg_date, reg_site))
+            return reg_date, reg_site, reg_pos, reg_time, new_t_num, True
 
         def add_bundle(offer_name, bundle, p_count, d_val, pct_flag, is_native=False):
             nonlocal accumulated_discount
@@ -429,12 +434,6 @@ class LotusOfferGenerator:
                 accumulated_discount += pot_disc
                 
             if is_native:
-                n_date = bundle[0]['Date']
-                n_site = bundle[0]['Site']
-                n_pos = str(bundle[0].get('POS no.', '101')).strip()
-                n_time = str(bundle[0].get('Time', '12:00:00 PM')).strip()
-                used_signatures.add((n_date, n_site, n_pos, n_time))
-
                 for is_discounted, items_subset in [(False, p_items), (True, d_items)]:
                     for item in items_subset:
                         r = item.copy()
@@ -449,23 +448,17 @@ class LotusOfferGenerator:
                             r['Net Sales EGP'] = price
                         processed_data.setdefault(offer_name, []).append(r)
             else:
-                base_item = bundle[0]
-                base_date = base_item['Date']
-                base_site = base_item['Site']
-                base_pos = base_item.get('POS no.', '101')
-                base_time = base_item.get('Time', '12:00:00 PM')
-                safe_pos, safe_time = resolve_pos_and_time(base_date, base_site, base_pos, base_time)
-                new_t_num = str(get_new_t_num(base_date, base_site))
-                
+                u_date, u_site, u_pos, u_time, u_t_num, is_new_trans = unified_receipt_fields(bundle)
+
                 for is_discounted, items_subset in [(False, p_items), (True, d_items)]:
                     for item in items_subset:
                         r = item.copy()
-                        r['Date'] = base_date
-                        r['Site'] = base_site
-                        r['POS no.'] = safe_pos
-                        r['Time'] = safe_time
-                        r['Trnsctn number'] = new_t_num
-                        r['Is_New_Trans'] = True
+                        r['Date'] = u_date
+                        r['Site'] = u_site
+                        r['POS no.'] = u_pos
+                        r['Time'] = u_time
+                        r['Trnsctn number'] = u_t_num
+                        r['Is_New_Trans'] = is_new_trans
                         
                         price = float(r['Gross Sales EGP'])
                         if is_discounted and apply_disc:
