@@ -1,4 +1,5 @@
-"""Lotus Offer Generator - Mix & Match Engine (Core Logic)"""
+"""Lotus Offer Generator - Mix & Match Engine (Core Logic)
+Mirrors Offer.py v1.4 process_data logic exactly."""
 import io
 import os
 import random
@@ -51,8 +52,45 @@ def parse_offer_string(offer_str):
         return None
 
 
-def _normalize_columns(df):
-    df.columns = [str(c).strip() for c in df.columns]
+def normalize_manufacturer_name(name):
+    """Normalize manufacturer keys so UI mappings match Excel groupby values."""
+    if name is None or (isinstance(name, float) and pd.isna(name)):
+        return ''
+    s = str(name).strip()
+    if not s or s.lower() == 'nan':
+        return ''
+    if s.endswith('.0'):
+        try:
+            s = str(int(float(s)))
+        except ValueError:
+            pass
+    return s
+
+
+def build_mapping_lookup(company_mappings):
+    """Build lookup with both exact and normalized manufacturer keys."""
+    lookup = {}
+    for key, offer in (company_mappings or {}).items():
+        exact = str(key).strip()
+        if exact:
+            lookup[exact] = offer
+        norm = normalize_manufacturer_name(key)
+        if norm:
+            lookup.setdefault(norm, offer)
+    return lookup
+
+
+def resolve_offer(lookup, manufacturer_value, default="Skip"):
+    key = str(manufacturer_value).strip()
+    if key in lookup:
+        return lookup[key]
+    return lookup.get(normalize_manufacturer_name(manufacturer_value), default)
+
+
+def _read_excel_simple(file_bytes):
+    """Same as Offer.py: pd.read_excel then strip column names."""
+    df = pd.read_excel(io.BytesIO(file_bytes))
+    df.columns = df.columns.str.strip()
     return df
 
 
@@ -60,91 +98,85 @@ def _find_header_row(raw_df):
     markers = {'Manufacturer Name', 'Date', 'Site', 'Trnsctn number', 'Gross Sales EGP'}
     for i in range(min(25, len(raw_df))):
         row_vals = {str(v).strip() for v in raw_df.iloc[i].values if pd.notna(v) and str(v).strip()}
-        if 'Manufacturer Name' in row_vals or len(markers.intersection(row_vals)) >= 2:
-            if 'Manufacturer Name' in row_vals or ('Date' in row_vals and 'Site' in row_vals):
-                return i
+        if 'Manufacturer Name' in row_vals or ('Date' in row_vals and 'Site' in row_vals):
+            return i
+        if len(markers.intersection(row_vals)) >= 2:
+            return i
     return 0
 
 
-def _read_excel_bytes(file_bytes):
+def _read_excel_with_header_detect(file_bytes):
+    """Fallback when simple read does not find expected columns."""
     buf = io.BytesIO(file_bytes)
-    try:
-        df = pd.read_excel(buf, engine='openpyxl')
-        df = _normalize_columns(df)
-        df = df.dropna(how='all')
-        if len(df) > 0 and 'Manufacturer Name' in df.columns:
-            return df
-    except Exception:
-        pass
-
-    buf.seek(0)
     raw = pd.read_excel(buf, header=None, engine='openpyxl')
     header_idx = _find_header_row(raw)
     buf.seek(0)
     df = pd.read_excel(buf, header=header_idx, engine='openpyxl')
-    df = _normalize_columns(df)
-    df = df.dropna(how='all')
-    if len(df) > 0 and 'Manufacturer Name' in df.columns:
-        return df
-
-    buf.seek(0)
-    xl = pd.ExcelFile(buf, engine='openpyxl')
-    best = df
-    best_score = len(df) if 'Manufacturer Name' in df.columns else 0
-    for sheet in xl.sheet_names:
-        try:
-            raw_s = pd.read_excel(xl, sheet_name=sheet, header=None)
-            h_idx = _find_header_row(raw_s)
-            temp = pd.read_excel(xl, sheet_name=sheet, header=h_idx)
-            temp = _normalize_columns(temp).dropna(how='all')
-            score = len(temp) if 'Manufacturer Name' in temp.columns else len(temp) // 2
-            if score > best_score:
-                best = temp
-                best_score = score
-        except Exception:
-            continue
-    return best
+    df.columns = df.columns.str.strip()
+    return df.dropna(how='all')
 
 
 def read_sales_file(file_bytes, filename):
+    """Read sales file — primary path matches Offer.py v1.4."""
     ext = os.path.splitext((filename or '').lower())[1]
 
     if ext in ('.xlsx', '.xls', '.xlsm', '.xlsb'):
-        if ext == '.xls':
-            df = pd.read_excel(io.BytesIO(file_bytes))
-        else:
-            df = _read_excel_bytes(file_bytes)
+        try:
+            df = _read_excel_simple(file_bytes)
+        except Exception:
+            df = _read_excel_with_header_detect(file_bytes)
+        if 'Manufacturer Name' not in df.columns and len(df.columns) > 0:
+            df = _read_excel_with_header_detect(file_bytes)
     else:
         try:
             df = pd.read_csv(io.BytesIO(file_bytes), encoding='utf-8-sig')
         except UnicodeDecodeError:
             df = pd.read_csv(io.BytesIO(file_bytes), encoding='cp1256')
-
-    df = _normalize_columns(df)
-    df = df.dropna(how='all')
-
-    col_fixes = {
-        'manufacturer name': 'Manufacturer Name',
-        'manufacturer': 'Manufacturer Name',
-        'trnsctn: sales sun': 'Trnsctn: Sales SUn',
-        'transact. type': 'Transact. type',
-    }
-    rename_map = {}
-    for col in df.columns:
-        key = col.strip().lower()
-        if key in col_fixes:
-            rename_map[col] = col_fixes[key]
-    if rename_map:
-        df = df.rename(columns=rename_map)
+        df.columns = df.columns.str.strip()
 
     return df
 
 
+def prepare_dataframe(df_original):
+    """Exact preprocessing from Offer.py v1.4 process_data (lines 327-337)."""
+    df_original = df_original.copy()
+    df_original.columns = df_original.columns.str.strip()
+    df_original['Date'] = pd.to_datetime(df_original['Date']).dt.date
+
+    if 'Time' in df_original.columns:
+        df_original['Time'] = pd.to_datetime(
+            df_original['Time'].astype(str), errors='coerce'
+        ).dt.strftime('%I:%M:%S %p').fillna(df_original['Time'])
+
+    df_original['Site'] = df_original['Site'].fillna('Unknown')
+
+    if 'Transact. type' not in df_original.columns:
+        df_original['Transact. type'] = 'Unknown'
+    else:
+        df_original['Transact. type'] = df_original['Transact. type'].fillna('Unknown')
+
+    df = df_original.drop_duplicates(
+        subset=['Date', 'Site', 'Trnsctn number', 'POS no.', 'Article'], keep='first'
+    ).copy()
+    return df_original, df
+
+
 def get_companies_from_df(df):
+    """Same company list logic as Offer.py browse_file + build_mapping_ui."""
     if 'Manufacturer Name' not in df.columns:
         return []
-    companies = df['Manufacturer Name'].dropna().astype(str).unique().tolist()
-    return sorted([c.strip() for c in companies if c.strip() and c.strip().lower() != 'nan'])
+    companies = sorted(df['Manufacturer Name'].dropna().astype(str).unique().tolist())
+    result = []
+    seen = set()
+    for comp in companies:
+        comp_clean = str(comp).strip()
+        if comp_clean == '' or comp_clean.lower() == 'nan':
+            continue
+        if comp_clean in seen:
+            continue
+        seen.add(comp_clean)
+        result.append(comp_clean)
+    return result
 
 
 def create_template_bytes():
@@ -164,21 +196,8 @@ def process_mix_match(
     end_date=None,
     target_discount=float('inf'),
 ):
-    df_original = df_original.copy()
-    df_original['Date'] = pd.to_datetime(df_original['Date']).dt.date
-
-    if 'Time' in df_original.columns:
-        df_original['Time'] = pd.to_datetime(
-            df_original['Time'].astype(str), errors='coerce'
-        ).dt.strftime('%I:%M:%S %p').fillna(df_original['Time'])
-
-    df_original['Site'] = df_original['Site'].fillna('Unknown')
-    if 'Transact. type' in df_original.columns:
-        df_original['Transact. type'] = df_original['Transact. type'].fillna('Unknown')
-
-    df = df_original.drop_duplicates(
-        subset=['Date', 'Site', 'Trnsctn number', 'POS no.', 'Article'], keep='first'
-    ).copy()
+    df_original, df = prepare_dataframe(df_original)
+    mapping_lookup = build_mapping_lookup(company_mappings)
 
     site_date_trans_info = {}
     for (d, s), group in df_original.groupby(['Date', 'Site']):
@@ -206,7 +225,7 @@ def process_mix_match(
 
     if target_branch != "All":
         df = df[df['Site'].str.strip() == target_branch.strip()]
-    if use_date_filter and start_date and end_date:
+    if use_date_filter:
         df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
 
     processed_data = {}
@@ -292,7 +311,7 @@ def process_mix_match(
 
     for comp_val, group in grouped:
         comp_val_str = str(comp_val).strip()
-        offer_str = company_mappings.get(comp_val_str, "Skip")
+        offer_str = resolve_offer(mapping_lookup, comp_val, "Skip")
 
         if offer_str == "Skip":
             true_unprocessed.extend(group.to_dict('records'))
@@ -315,7 +334,9 @@ def process_mix_match(
                     if qty <= 0:
                         true_unprocessed.append(row.to_dict())
                         continue
-                    unit_gross = round(float(str(row.get('Gross Sales EGP', 0)).replace(',', '').strip() or 0) / qty, 2)
+                    unit_gross = round(
+                        float(str(row.get('Gross Sales EGP', 0)).replace(',', '').strip() or 0) / qty, 2
+                    )
                     for _ in range(int(qty)):
                         item = row.to_dict()
                         item['Trnsctn: Sales SUn'] = 1.0

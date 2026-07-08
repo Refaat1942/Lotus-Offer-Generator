@@ -149,7 +149,7 @@ def upload_file():
         session['uploaded_ext'] = os.path.splitext(orig_name)[1].lower() or '.xlsx'
         session.modified = True
 
-        row_count = len(df.dropna(how='all'))
+        row_count = len(df)
         has_mfg = 'Manufacturer Name' in df.columns
         return jsonify({
             'success': True,
@@ -195,7 +195,9 @@ def process():
             filename = 'data' + session.get('uploaded_ext', '.xlsx')
         df_original = read_sales_file(file_bytes, filename)
 
-        if use_date_filter and start_date and end_date:
+        if use_date_filter:
+            if not start_date or not end_date:
+                return jsonify({'error': 'Please select valid dates from the calendar'}), 400
             start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
             end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
         else:
