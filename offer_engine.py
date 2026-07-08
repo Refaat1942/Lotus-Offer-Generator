@@ -1,5 +1,4 @@
-"""Lotus Offer Generator - Mix & Match Engine (Core Logic)
-Mirrors Offer.py v1.4 process_data logic exactly."""
+"""Lotus Offer Generator - Mix & Match Engine (Core Logic)"""
 import io
 import os
 import random
@@ -246,6 +245,16 @@ def process_mix_match(
                 used_signatures.add((b_date, b_site, curr_pos, curr_time))
                 return curr_pos, curr_time
 
+    def resolve_pos_and_time(b_date, b_site, preferred_pos, preferred_time):
+        """Keep paired items on the same receipt POS when possible."""
+        pos = str(preferred_pos or '101').strip()
+        time_val = str(preferred_time or '12:00:00 PM').strip()
+        signature = (b_date, b_site, pos, time_val)
+        if signature not in used_signatures:
+            used_signatures.add(signature)
+            return pos, time_val
+        return get_safe_pos_and_time(b_date, b_site)
+
     def add_bundle(offer_name, bundle, p_count, d_val, pct_flag, is_native=False):
         nonlocal accumulated_discount
         bundle.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
@@ -285,7 +294,9 @@ def process_mix_match(
             base_item = bundle[0]
             base_date = base_item['Date']
             base_site = base_item['Site']
-            safe_pos, safe_time = get_safe_pos_and_time(base_date, base_site)
+            base_pos = base_item.get('POS no.', '101')
+            base_time = base_item.get('Time', '12:00:00 PM')
+            safe_pos, safe_time = resolve_pos_and_time(base_date, base_site, base_pos, base_time)
             new_t_num = str(get_new_t_num(base_date, base_site))
 
             for is_discounted, items_subset in [(False, p_items), (True, d_items)]:
@@ -307,6 +318,67 @@ def process_mix_match(
                         r['Net Sales EGP'] = price
                     processed_data.setdefault(offer_name, []).append(r)
 
+    def expand_transaction_items(trans_group):
+        trans_items = []
+        for _, row in trans_group.iterrows():
+            qty = float(str(row.get('Trnsctn: Sales SUn', 0)).replace(',', '').strip() or 0)
+            if qty <= 0:
+                true_unprocessed.append(row.to_dict())
+                continue
+            unit_gross = round(
+                float(str(row.get('Gross Sales EGP', 0)).replace(',', '').strip() or 0) / qty, 2
+            )
+            for _ in range(int(qty)):
+                item = row.to_dict()
+                item['Trnsctn: Sales SUn'] = 1.0
+                item['Gross Sales EGP'] = unit_gross
+                trans_items.append(item)
+        return trans_items
+
+    def process_leftover_pool(items, offer_str, chunk_size, paid_count, discount_val, is_percentage):
+        """Pair leftovers: same POS first, then branch-wide, then 1+50% emergency pairs."""
+        if not items:
+            return
+
+        items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+        branch_leftovers = []
+
+        pos_buckets = {}
+        for item in items:
+            pos_key = (
+                item['Date'],
+                item['Site'],
+                str(item.get('POS no.', '101')).strip(),
+            )
+            pos_buckets.setdefault(pos_key, []).append(item)
+
+        for pos_items in pos_buckets.values():
+            pos_items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+            k_pos = len(pos_items) // chunk_size
+            branch_leftovers.extend(pos_items[k_pos * chunk_size:])
+            for b_idx in range(k_pos):
+                bundle = pos_items[b_idx * chunk_size: (b_idx + 1) * chunk_size]
+                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+
+        branch_leftovers.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+        k_branch = len(branch_leftovers) // chunk_size
+        final_orphans = branch_leftovers[k_branch * chunk_size:]
+
+        for b_idx in range(k_branch):
+            bundle = branch_leftovers[b_idx * chunk_size: (b_idx + 1) * chunk_size]
+            add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+
+        while len(final_orphans) >= 2:
+            bundle = final_orphans[:2]
+            final_orphans = final_orphans[2:]
+            add_bundle("1+50%", bundle, 1, 0.5, True, is_native=False)
+
+        for item in final_orphans:
+            r = item.copy()
+            r['Sls Discount EGP'] = 0.00
+            r['Net Sales EGP'] = float(r['Gross Sales EGP'])
+            true_unprocessed.append(r)
+
     grouped = df.groupby('Manufacturer Name', dropna=False)
 
     for comp_val, group in grouped:
@@ -323,54 +395,24 @@ def process_mix_match(
             continue
 
         chunk_size, paid_count, discount_val, is_percentage = parsed_offer
+        company_leftovers = []
 
+        # Phase 1: native bundles inside each transaction (still split by Transact. type)
         for sale_type, type_group in group.groupby('Transact. type', dropna=False):
-            company_type_leftovers = []
-
             for (d_val, s_val, t_val), trans_group in type_group.groupby(['Date', 'Site', 'Trnsctn number']):
-                trans_items = []
-                for _, row in trans_group.iterrows():
-                    qty = float(str(row.get('Trnsctn: Sales SUn', 0)).replace(',', '').strip() or 0)
-                    if qty <= 0:
-                        true_unprocessed.append(row.to_dict())
-                        continue
-                    unit_gross = round(
-                        float(str(row.get('Gross Sales EGP', 0)).replace(',', '').strip() or 0) / qty, 2
-                    )
-                    for _ in range(int(qty)):
-                        item = row.to_dict()
-                        item['Trnsctn: Sales SUn'] = 1.0
-                        item['Gross Sales EGP'] = unit_gross
-                        trans_items.append(item)
-
+                trans_items = expand_transaction_items(trans_group)
                 trans_items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-                K = len(trans_items) // chunk_size
-                company_type_leftovers.extend(trans_items[K * chunk_size:])
-
-                for b_idx in range(K):
+                k = len(trans_items) // chunk_size
+                company_leftovers.extend(trans_items[k * chunk_size:])
+                for b_idx in range(k):
                     bundle = trans_items[b_idx * chunk_size: (b_idx + 1) * chunk_size]
                     is_native = (b_idx == 0)
                     add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=is_native)
 
-            if company_type_leftovers:
-                company_type_leftovers.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-                K_left = len(company_type_leftovers) // chunk_size
-                final_orphans = company_type_leftovers[K_left * chunk_size:]
-
-                for b_idx in range(K_left):
-                    bundle = company_type_leftovers[b_idx * chunk_size: (b_idx + 1) * chunk_size]
-                    add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
-
-                while len(final_orphans) >= 2:
-                    bundle = final_orphans[:2]
-                    final_orphans = final_orphans[2:]
-                    add_bundle("1+50%", bundle, 1, 0.5, True, is_native=False)
-
-                for item in final_orphans:
-                    r = item.copy()
-                    r['Sls Discount EGP'] = 0.00
-                    r['Net Sales EGP'] = float(r['Gross Sales EGP'])
-                    true_unprocessed.append(r)
+        # Phase 2: merge all leftovers across Transact. types, pair same POS first
+        process_leftover_pool(
+            company_leftovers, offer_str, chunk_size, paid_count, discount_val, is_percentage
+        )
 
     return processed_data, true_unprocessed, accumulated_discount
 

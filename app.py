@@ -28,6 +28,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
 
 ADMIN_USER = os.environ.get('ADMIN_USER', 'admin')
 ADMIN_PASS_HASH = generate_password_hash(os.environ.get('ADMIN_PASS', 'admin'))
@@ -56,20 +58,34 @@ def login_required(f):
     return decorated
 
 
+def _wants_json():
+    return (
+        request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+        or request.accept_mimetypes.best_match(['application/json', 'text/html']) == 'application/json'
+    )
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if session.get('logged_in'):
+        if _wants_json():
+            return jsonify({'success': True, 'redirect': url_for('index')})
         return redirect(url_for('index'))
     error = None
     if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        password = request.form.get('password', '')
+        payload = request.get_json(silent=True) or {}
+        username = (request.form.get('username') or payload.get('username') or '').strip()
+        password = request.form.get('password') or payload.get('password') or ''
         if username == ADMIN_USER and check_password_hash(ADMIN_PASS_HASH, password):
             session['logged_in'] = True
             session['username'] = username
             _ensure_session_id()
+            if _wants_json():
+                return jsonify({'success': True, 'redirect': url_for('index')})
             return redirect(url_for('index'))
         error = 'Invalid username or password'
+        if _wants_json():
+            return jsonify({'error': error}), 401
     return render_template('login.html', error=error, version=APP_VERSION)
 
 
