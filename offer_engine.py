@@ -317,23 +317,24 @@ def process_mix_match(
         )
 
     def unified_receipt_fields(bundle):
-        """Align paired lines to one receipt: same date, POS, time, and transaction."""
+        """Align paired lines to one receipt: date, POS, time, transaction, transact type."""
         lead = bundle[0]
         reg_date = lead['Date']
         reg_site = lead['Site']
         reg_pos = str(lead.get('POS no.', '101')).strip()
         reg_time = str(lead.get('Time', '12:00:00 PM')).strip()
         reg_t_num = str(lead.get('Trnsctn number', '')).strip()
+        reg_transact = lead.get('Transact. type', 'Unknown')
 
         if bundle_shares_same_register(bundle):
-            return reg_date, reg_site, reg_pos, reg_time, reg_t_num, False
+            return reg_date, reg_site, reg_pos, reg_time, reg_t_num, reg_transact, False
 
         new_t_num = str(get_new_t_num(reg_date, reg_site))
-        return reg_date, reg_site, reg_pos, reg_time, new_t_num, True
+        return reg_date, reg_site, reg_pos, reg_time, new_t_num, reg_transact, True
 
     def write_bundle_rows(offer_name, bundle, p_items, d_items, apply_disc, d_val, pct_flag,
                           u_date=None, u_site=None, u_pos=None, u_time=None, u_t_num=None,
-                          is_new_trans=False, align_fields=False):
+                          u_transact=None, is_new_trans=False, align_fields=False):
         for is_discounted, items_subset in [(False, p_items), (True, d_items)]:
             for item in items_subset:
                 r = item.copy()
@@ -343,6 +344,8 @@ def process_mix_match(
                     r['POS no.'] = u_pos
                     r['Time'] = u_time
                     r['Trnsctn number'] = u_t_num
+                    if u_transact is not None:
+                        r['Transact. type'] = u_transact
                 r['Is_New_Trans'] = is_new_trans
                 r['offers Company'] = offer_name
                 price = float(r['Gross Sales EGP'])
@@ -371,10 +374,10 @@ def process_mix_match(
         if apply_disc:
             accumulated_discount += pot_disc
 
-        u_date, u_site, u_pos, u_time, u_t_num, is_new_trans = unified_receipt_fields(bundle)
+        u_date, u_site, u_pos, u_time, u_t_num, u_transact, is_new_trans = unified_receipt_fields(bundle)
         write_bundle_rows(
             offer_name, bundle, p_items, d_items, apply_disc, d_val, pct_flag,
-            u_date, u_site, u_pos, u_time, u_t_num, is_new_trans, align_fields=True,
+            u_date, u_site, u_pos, u_time, u_t_num, u_transact, is_new_trans, align_fields=True,
         )
 
     def add_pair_bundle(offer_str, bundle):
