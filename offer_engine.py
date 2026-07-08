@@ -187,6 +187,45 @@ def get_companies_from_df(df):
     return result
 
 
+def _item_fingerprint(item):
+    """Unique key for a single sale unit (prevents duplicate export rows)."""
+    gross = item.get('Gross Sales EGP', 0)
+    try:
+        gross = round(float(str(gross).replace(',', '').strip() or 0), 2)
+    except (TypeError, ValueError):
+        gross = 0.0
+    article_key = item.get('Article Number', item.get('Article', ''))
+    return (
+        str(item.get('Date', '')),
+        str(item.get('Site', '')).strip(),
+        str(item.get('POS no.', '')).strip(),
+        normalize_manufacturer_name(item.get('Manufacturer Name')),
+        str(article_key).strip(),
+        gross,
+    )
+
+
+def _collect_processed_fingerprints(processed_data):
+    fps = set()
+    for rows in processed_data.values():
+        for row in rows:
+            fps.add(_item_fingerprint(row))
+    return fps
+
+
+def _filter_unprocessed_export(true_unprocessed, processed_data):
+    """Drop rows already represented in processed sheets (keeps quantities correct)."""
+    seen = _collect_processed_fingerprints(processed_data)
+    filtered = []
+    for row in true_unprocessed:
+        fp = _item_fingerprint(row)
+        if fp in seen:
+            continue
+        filtered.append(row)
+        seen.add(fp)
+    return filtered
+
+
 def create_template_bytes():
     df_template = pd.DataFrame(columns=TEMPLATE_COLUMNS)
     buffer = io.BytesIO()
@@ -392,11 +431,7 @@ def process_mix_match(
             final_orphans = final_orphans[2:]
             add_pair_bundle(offer_str, bundle)
 
-        for item in final_orphans:
-            r = item.copy()
-            r['Sls Discount EGP'] = 0.00
-            r['Net Sales EGP'] = float(r['Gross Sales EGP'])
-            true_unprocessed.append(r)
+        # Single leftovers are omitted — exporting them duplicates source qty counts
 
     def sweep_unprocessed_receipt_pairs():
         """Last pass: pair any same-POS orphans still sitting in Unprocessed."""
@@ -441,7 +476,11 @@ def process_mix_match(
                 orphans = orphans[2:]
                 add_pair_bundle(offer_str, bundle)
 
-            pending.extend(orphans)
+            # Keep only Skip / invalid-offer singles; drop offer-mapped orphans
+            for item in orphans:
+                offer_for_item = resolve_offer(mapping_lookup, item.get('Manufacturer Name'), 'Skip')
+                if offer_for_item == 'Skip' or not parse_offer_string(offer_for_item):
+                    pending.append(item)
 
         true_unprocessed = pending
 
@@ -498,6 +537,8 @@ def process_mix_match(
 
     sweep_unprocessed_receipt_pairs()
 
+    true_unprocessed = _filter_unprocessed_export(true_unprocessed, processed_data)
+
     return processed_data, true_unprocessed, accumulated_discount
 
 
@@ -522,9 +563,10 @@ def export_to_excel(processed_data, true_unprocessed):
                             worksheet.cell(row=row_idx, column=t_num_idx).font = bold_blue_font
 
         if true_unprocessed:
-            df_unp = pd.DataFrame(true_unprocessed)
-            final_cols_unp = [col for col in TEMPLATE_COLUMNS if col in df_unp.columns]
-            df_unp[final_cols_unp].to_excel(writer, index=False, sheet_name='Unprocessed')
+            df_unp = pd.DataFrame(_filter_unprocessed_export(true_unprocessed, processed_data))
+            if not df_unp.empty:
+                final_cols_unp = [col for col in TEMPLATE_COLUMNS if col in df_unp.columns]
+                df_unp[final_cols_unp].to_excel(writer, index=False, sheet_name='Unprocessed')
 
     buffer.seek(0)
     return buffer.getvalue()

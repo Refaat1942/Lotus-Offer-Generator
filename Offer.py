@@ -5,6 +5,7 @@ from tkcalendar import DateEntry
 import pandas as pd
 from datetime import datetime, timedelta
 from openpyxl.styles import Font
+from offer_engine import _filter_unprocessed_export
 import os
 import sys
 import hashlib
@@ -553,11 +554,7 @@ class LotusOfferGenerator:
                 final_orphans = final_orphans[2:]
                 add_pair_bundle(offer_str, bundle)
 
-            for item in final_orphans:
-                r = item.copy()
-                r['Sls Discount EGP'] = 0.00
-                r['Net Sales EGP'] = float(r['Gross Sales EGP'])
-                true_unprocessed.append(r)
+            # Single leftovers omitted — would duplicate qty in export
 
         def sweep_unprocessed_receipt_pairs():
             nonlocal true_unprocessed
@@ -602,7 +599,11 @@ class LotusOfferGenerator:
                     orphans = orphans[2:]
                     add_pair_bundle(offer_str, bundle)
 
-                pending.extend(orphans)
+                for item in orphans:
+                    comp_key = str(item.get('Manufacturer Name', '')).strip()
+                    offer_for_item = self.company_mappings.get(comp_key, ctk.StringVar(value="Skip")).get()
+                    if offer_for_item == "Skip" or not self.parse_offer_string(offer_for_item):
+                        pending.append(item)
 
             true_unprocessed = pending
 
@@ -640,6 +641,8 @@ class LotusOfferGenerator:
 
         sweep_unprocessed_receipt_pairs()
 
+        true_unprocessed = _filter_unprocessed_export(true_unprocessed, processed_data)
+
         total_processed = sum(len(lst) for lst in processed_data.values())
         if total_processed == 0 and not true_unprocessed:
             messagebox.showinfo("Info", "No data generated. Check your mappings.")
@@ -673,9 +676,10 @@ class LotusOfferGenerator:
                                     worksheet.cell(row=row_idx, column=t_num_idx).font = bold_blue_font
 
                 if true_unprocessed:
-                    df_unp = pd.DataFrame(true_unprocessed)
-                    final_cols_unp = [col for col in self.template_columns if col in df_unp.columns]
-                    df_unp[final_cols_unp].to_excel(writer, index=False, sheet_name='Unprocessed')
+                    df_unp = pd.DataFrame(_filter_unprocessed_export(true_unprocessed, processed_data))
+                    if not df_unp.empty:
+                        final_cols_unp = [col for col in self.template_columns if col in df_unp.columns]
+                        df_unp[final_cols_unp].to_excel(writer, index=False, sheet_name='Unprocessed')
 
             target_display = target_str if target_str else "No Limit"
             msg = (f"🎉 Mix & Match Exported Successfully!\n\n"
