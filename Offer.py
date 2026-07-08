@@ -86,7 +86,7 @@ class LotusOfferGenerator:
         self.filter_by_date_var = ctk.BooleanVar(value=False)
         self.target_discount_var = ctk.StringVar()
         
-        self.available_offers = ["Skip", "1+1", "1+50%", "2+1", "10%", "20%"]
+        self.available_offers = ["Skip", "1+50%", "1+1", "2+1", "10%", "20%"]
         
         self.company_mappings = {}  
         self.company_checkbox_vars = {} 
@@ -239,7 +239,7 @@ class LotusOfferGenerator:
             lbl = ctk.CTkLabel(row_frame, text=comp_clean, width=300, anchor="w", font=ctk.CTkFont(weight="bold"))
             lbl.pack(side="left", padx=5)
             
-            offer_var = ctk.StringVar(value="Skip")
+            offer_var = ctk.StringVar(value="1+50%")
             combo = ctk.CTkOptionMenu(row_frame, variable=offer_var, values=self.available_offers, width=200)
             combo.pack(side="left", padx=10)
             
@@ -333,7 +333,12 @@ class LotusOfferGenerator:
             if 'Transact. type' in df_original.columns:
                 df_original['Transact. type'] = df_original['Transact. type'].fillna('Unknown')
 
-            df = df_original.drop_duplicates(subset=['Date', 'Site', 'Trnsctn number', 'POS no.', 'Article'], keep='first').copy()
+            dedupe_cols = ['Date', 'Site', 'Trnsctn number', 'POS no.']
+            if 'Article Number' in df_original.columns:
+                dedupe_cols.append('Article Number')
+            elif 'Article' in df_original.columns:
+                dedupe_cols.append('Article')
+            df = df_original.drop_duplicates(subset=dedupe_cols, keep='first').copy()
         except Exception as e:
             messagebox.showerror("Error", f"Failed to process the data:\n{e}")
             return
@@ -408,11 +413,7 @@ class LotusOfferGenerator:
             reg_t_num = str(lead.get('Trnsctn number', '')).strip()
 
             if bundle_shares_same_register(bundle):
-                merged = any(
-                    str(item.get('Trnsctn number', '')).strip() != reg_t_num
-                    for item in bundle[1:]
-                )
-                return reg_date, reg_site, reg_pos, reg_time, reg_t_num, merged
+                return reg_date, reg_site, reg_pos, reg_time, reg_t_num, False
 
             new_t_num = str(get_new_t_num(reg_date, reg_site))
             return reg_date, reg_site, reg_pos, reg_time, new_t_num, True
@@ -438,6 +439,7 @@ class LotusOfferGenerator:
                     for item in items_subset:
                         r = item.copy()
                         r['Is_New_Trans'] = False
+                        r['offers Company'] = offer_name
                         price = float(r['Gross Sales EGP'])
                         if is_discounted and apply_disc:
                             item_disc = round(price * d_val, 2) if pct_flag else price
@@ -459,6 +461,7 @@ class LotusOfferGenerator:
                         r['Time'] = u_time
                         r['Trnsctn number'] = u_t_num
                         r['Is_New_Trans'] = is_new_trans
+                        r['offers Company'] = offer_name
                         
                         price = float(r['Gross Sales EGP'])
                         if is_discounted and apply_disc:
@@ -470,6 +473,14 @@ class LotusOfferGenerator:
                             r['Net Sales EGP'] = price
                         
                         processed_data.setdefault(offer_name, []).append(r)
+
+        def add_pair_bundle(offer_str, bundle):
+            parsed = self.parse_offer_string(offer_str)
+            if parsed and parsed[0] == 2:
+                _, paid_count, discount_val, is_percentage = parsed
+                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+            else:
+                add_bundle("1+50%", bundle, 1, 0.5, True, is_native=False)
 
         def expand_transaction_items(trans_group):
             trans_items = []
@@ -486,44 +497,114 @@ class LotusOfferGenerator:
                     trans_items.append(item)
             return trans_items
 
+        def bucket_items(items, key_fn):
+            buckets = {}
+            for item in items:
+                buckets.setdefault(key_fn(item), []).append(item)
+            return buckets
+
+        def process_item_pool(items, offer_str, chunk_size, paid_count, discount_val, is_percentage):
+            if not items:
+                return []
+            items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+            k = len(items) // chunk_size
+            orphans = items[k * chunk_size:]
+            for b_idx in range(k):
+                bundle = items[b_idx * chunk_size : (b_idx + 1) * chunk_size]
+                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+            return orphans
+
         def process_leftover_pool(items, offer_str, chunk_size, paid_count, discount_val, is_percentage):
             if not items:
                 return
 
-            items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
             branch_leftovers = []
+            for receipt_items in bucket_items(
+                items,
+                lambda it: (
+                    it['Date'], it['Site'],
+                    str(it.get('POS no.', '101')).strip(),
+                    str(it.get('Trnsctn number', '')).strip(),
+                ),
+            ).values():
+                branch_leftovers.extend(
+                    process_item_pool(receipt_items, offer_str, chunk_size, paid_count, discount_val, is_percentage)
+                )
 
-            pos_buckets = {}
-            for item in items:
-                pos_key = (item['Date'], item['Site'], str(item.get('POS no.', '101')).strip())
-                pos_buckets.setdefault(pos_key, []).append(item)
+            pos_leftovers = []
+            for pos_items in bucket_items(
+                branch_leftovers,
+                lambda it: (it['Date'], it['Site'], str(it.get('POS no.', '101')).strip()),
+            ).values():
+                pos_leftovers.extend(
+                    process_item_pool(pos_items, offer_str, chunk_size, paid_count, discount_val, is_percentage)
+                )
 
-            for pos_items in pos_buckets.values():
-                pos_items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-                k_pos = len(pos_items) // chunk_size
-                branch_leftovers.extend(pos_items[k_pos * chunk_size:])
-                for b_idx in range(k_pos):
-                    bundle = pos_items[b_idx * chunk_size : (b_idx + 1) * chunk_size]
-                    add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
-
-            branch_leftovers.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-            k_branch = len(branch_leftovers) // chunk_size
-            final_orphans = branch_leftovers[k_branch * chunk_size:]
+            pos_leftovers.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+            k_branch = len(pos_leftovers) // chunk_size
+            final_orphans = pos_leftovers[k_branch * chunk_size:]
 
             for b_idx in range(k_branch):
-                bundle = branch_leftovers[b_idx * chunk_size : (b_idx + 1) * chunk_size]
+                bundle = pos_leftovers[b_idx * chunk_size : (b_idx + 1) * chunk_size]
                 add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
 
             while len(final_orphans) >= 2:
                 bundle = final_orphans[:2]
                 final_orphans = final_orphans[2:]
-                add_bundle("1+50%", bundle, 1, 0.5, True, is_native=False)
+                add_pair_bundle(offer_str, bundle)
 
             for item in final_orphans:
                 r = item.copy()
                 r['Sls Discount EGP'] = 0.00
                 r['Net Sales EGP'] = float(r['Gross Sales EGP'])
                 true_unprocessed.append(r)
+
+        def sweep_unprocessed_receipt_pairs():
+            nonlocal true_unprocessed
+            pending = []
+            pair_groups = {}
+
+            for item in true_unprocessed:
+                comp_key = str(item.get('Manufacturer Name', '')).strip()
+                offer_str = self.company_mappings.get(comp_key, ctk.StringVar(value="Skip")).get()
+                if offer_str == "Skip":
+                    pending.append(item)
+                    continue
+                parsed = self.parse_offer_string(offer_str)
+                if not parsed:
+                    pending.append(item)
+                    continue
+
+                key = (
+                    comp_key,
+                    item['Date'],
+                    item['Site'],
+                    str(item.get('POS no.', '101')).strip(),
+                    offer_str,
+                )
+                pair_groups.setdefault(key, {'offer': offer_str, 'parsed': parsed, 'items': []})
+                pair_groups[key]['items'].append(item)
+
+            for group in pair_groups.values():
+                offer_str = group['offer']
+                chunk_size, paid_count, discount_val, is_percentage = group['parsed']
+                items = group['items']
+                items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+
+                k = len(items) // chunk_size
+                orphans = items[k * chunk_size:]
+                for b_idx in range(k):
+                    bundle = items[b_idx * chunk_size : (b_idx + 1) * chunk_size]
+                    add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+
+                while len(orphans) >= 2:
+                    bundle = orphans[:2]
+                    orphans = orphans[2:]
+                    add_pair_bundle(offer_str, bundle)
+
+                pending.extend(orphans)
+
+            true_unprocessed = pending
 
         grouped = df.groupby('Manufacturer Name', dropna=False)
 
@@ -543,20 +624,21 @@ class LotusOfferGenerator:
             chunk_size, paid_count, discount_val, is_percentage = parsed_offer
             company_leftovers = []
 
-            for sale_type, type_group in group.groupby('Transact. type', dropna=False):
-                for (d_val, s_val, t_val), trans_group in type_group.groupby(['Date', 'Site', 'Trnsctn number']):
-                    trans_items = expand_transaction_items(trans_group)
-                    trans_items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-                    k = len(trans_items) // chunk_size
-                    company_leftovers.extend(trans_items[k * chunk_size:])
-                    for b_idx in range(k):
-                        bundle = trans_items[b_idx * chunk_size : (b_idx + 1) * chunk_size]
-                        is_native = (b_idx == 0)
-                        add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=is_native)
+            for (d_val, s_val, t_val), trans_group in group.groupby(['Date', 'Site', 'Trnsctn number']):
+                trans_items = expand_transaction_items(trans_group)
+                trans_items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+                k = len(trans_items) // chunk_size
+                company_leftovers.extend(trans_items[k * chunk_size:])
+                for b_idx in range(k):
+                    bundle = trans_items[b_idx * chunk_size : (b_idx + 1) * chunk_size]
+                    is_native = (b_idx == 0)
+                    add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=is_native)
 
             process_leftover_pool(
                 company_leftovers, offer_str, chunk_size, paid_count, discount_val, is_percentage
             )
+
+        sweep_unprocessed_receipt_pairs()
 
         total_processed = sum(len(lst) for lst in processed_data.values())
         if total_processed == 0 and not true_unprocessed:

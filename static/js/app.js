@@ -105,9 +105,11 @@
         tbody.innerHTML = '';
 
         companies.forEach((comp) => {
-            companyMappings[comp] = 'Skip';
+            companyMappings[comp] = '1+50%';
             const tr = document.createElement('tr');
-            const options = availableOffers.map(o => `<option value="${o}">${o}</option>`).join('');
+            const options = availableOffers.map(o =>
+                `<option value="${o}" ${o === '1+50%' ? 'selected' : ''}>${o}</option>`
+            ).join('');
             tr.innerHTML = `<td><strong>${comp}</strong></td><td><select class="form-select offer-select" data-company="${comp}">${options}</select></td>`;
             tbody.appendChild(tr);
         });

@@ -25,7 +25,7 @@ BRANCHES = [
     "الحصرى - 6 أكتوبر"
 ]
 
-DEFAULT_OFFERS = ["Skip", "1+1", "1+50%", "2+1", "10%", "20%"]
+DEFAULT_OFFERS = ["Skip", "1+50%", "1+1", "2+1", "10%", "20%"]
 
 
 def parse_offer_string(offer_str):
@@ -154,9 +154,19 @@ def prepare_dataframe(df_original):
         df_original['Transact. type'] = df_original['Transact. type'].fillna('Unknown')
 
     df = df_original.drop_duplicates(
-        subset=['Date', 'Site', 'Trnsctn number', 'POS no.', 'Article'], keep='first'
+        subset=_dedupe_columns(df_original), keep='first'
     ).copy()
     return df_original, df
+
+
+def _dedupe_columns(df):
+    """Dedupe line items without collapsing different products on the same receipt."""
+    cols = ['Date', 'Site', 'Trnsctn number', 'POS no.']
+    if 'Article Number' in df.columns:
+        cols.append('Article Number')
+    elif 'Article' in df.columns:
+        cols.append('Article')
+    return cols
 
 
 def get_companies_from_df(df):
@@ -255,14 +265,34 @@ def process_mix_match(
         reg_t_num = str(lead.get('Trnsctn number', '')).strip()
 
         if bundle_shares_same_register(bundle):
-            merged = any(
-                str(item.get('Trnsctn number', '')).strip() != reg_t_num
-                for item in bundle[1:]
-            )
-            return reg_date, reg_site, reg_pos, reg_time, reg_t_num, merged
+            return reg_date, reg_site, reg_pos, reg_time, reg_t_num, False
 
         new_t_num = str(get_new_t_num(reg_date, reg_site))
         return reg_date, reg_site, reg_pos, reg_time, new_t_num, True
+
+    def write_bundle_rows(offer_name, bundle, p_items, d_items, apply_disc, d_val, pct_flag,
+                          u_date=None, u_site=None, u_pos=None, u_time=None, u_t_num=None,
+                          is_new_trans=False, align_fields=False):
+        for is_discounted, items_subset in [(False, p_items), (True, d_items)]:
+            for item in items_subset:
+                r = item.copy()
+                if align_fields:
+                    r['Date'] = u_date
+                    r['Site'] = u_site
+                    r['POS no.'] = u_pos
+                    r['Time'] = u_time
+                    r['Trnsctn number'] = u_t_num
+                r['Is_New_Trans'] = is_new_trans
+                r['offers Company'] = offer_name
+                price = float(r['Gross Sales EGP'])
+                if is_discounted and apply_disc:
+                    item_disc = round(price * d_val, 2) if pct_flag else price
+                    r['Sls Discount EGP'] = -item_disc
+                    r['Net Sales EGP'] = price - item_disc
+                else:
+                    r['Sls Discount EGP'] = 0.00
+                    r['Net Sales EGP'] = price
+                processed_data.setdefault(offer_name, []).append(r)
 
     def add_bundle(offer_name, bundle, p_count, d_val, pct_flag, is_native=False):
         nonlocal accumulated_discount
@@ -280,40 +310,140 @@ def process_mix_match(
             accumulated_discount += pot_disc
 
         if is_native:
-            for is_discounted, items_subset in [(False, p_items), (True, d_items)]:
-                for item in items_subset:
-                    r = item.copy()
-                    r['Is_New_Trans'] = False
-                    price = float(r['Gross Sales EGP'])
-                    if is_discounted and apply_disc:
-                        item_disc = round(price * d_val, 2) if pct_flag else price
-                        r['Sls Discount EGP'] = -item_disc
-                        r['Net Sales EGP'] = price - item_disc
-                    else:
-                        r['Sls Discount EGP'] = 0.00
-                        r['Net Sales EGP'] = price
-                    processed_data.setdefault(offer_name, []).append(r)
+            write_bundle_rows(
+                offer_name, bundle, p_items, d_items, apply_disc, d_val, pct_flag,
+                is_new_trans=False, align_fields=False,
+            )
         else:
             u_date, u_site, u_pos, u_time, u_t_num, is_new_trans = unified_receipt_fields(bundle)
+            write_bundle_rows(
+                offer_name, bundle, p_items, d_items, apply_disc, d_val, pct_flag,
+                u_date, u_site, u_pos, u_time, u_t_num, is_new_trans, align_fields=True,
+            )
 
-            for is_discounted, items_subset in [(False, p_items), (True, d_items)]:
-                for item in items_subset:
-                    r = item.copy()
-                    r['Date'] = u_date
-                    r['Site'] = u_site
-                    r['POS no.'] = u_pos
-                    r['Time'] = u_time
-                    r['Trnsctn number'] = u_t_num
-                    r['Is_New_Trans'] = is_new_trans
-                    price = float(r['Gross Sales EGP'])
-                    if is_discounted and apply_disc:
-                        item_disc = round(price * d_val, 2) if pct_flag else price
-                        r['Sls Discount EGP'] = -item_disc
-                        r['Net Sales EGP'] = price - item_disc
-                    else:
-                        r['Sls Discount EGP'] = 0.00
-                        r['Net Sales EGP'] = price
-                    processed_data.setdefault(offer_name, []).append(r)
+    def add_pair_bundle(offer_str, bundle):
+        """Pair exactly 2 leftover items using the mapped company offer (e.g. 1+50%)."""
+        parsed = parse_offer_string(offer_str)
+        if parsed and parsed[0] == 2:
+            _, paid_count, discount_val, is_percentage = parsed
+            add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+        else:
+            add_bundle('1+50%', bundle, 1, 0.5, True, is_native=False)
+
+    def bucket_items(items, key_fn):
+        buckets = {}
+        for item in items:
+            buckets.setdefault(key_fn(item), []).append(item)
+        return buckets
+
+    def process_item_pool(items, offer_str, chunk_size, paid_count, discount_val, is_percentage):
+        """Form offer bundles from a pool; return items that could not be paired."""
+        if not items:
+            return []
+
+        items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+        k = len(items) // chunk_size
+        orphans = items[k * chunk_size:]
+        for b_idx in range(k):
+            bundle = items[b_idx * chunk_size: (b_idx + 1) * chunk_size]
+            add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+        return orphans
+
+    def process_leftover_pool(items, offer_str, chunk_size, paid_count, discount_val, is_percentage):
+        """Pair leftovers: same receipt, same POS register, branch-wide, then pairs of 2."""
+        if not items:
+            return
+
+        branch_leftovers = []
+
+        # 1) Exact same receipt (date + branch + POS + transaction)
+        for receipt_items in bucket_items(
+            items,
+            lambda it: (
+                it['Date'], it['Site'],
+                str(it.get('POS no.', '101')).strip(),
+                str(it.get('Trnsctn number', '')).strip(),
+            ),
+        ).values():
+            branch_leftovers.extend(
+                process_item_pool(receipt_items, offer_str, chunk_size, paid_count, discount_val, is_percentage)
+            )
+
+        # 2) Same register/day (date + branch + POS) — unify to one receipt line pattern
+        pos_leftovers = []
+        for pos_items in bucket_items(
+            branch_leftovers,
+            lambda it: (it['Date'], it['Site'], str(it.get('POS no.', '101')).strip()),
+        ).values():
+            pos_leftovers.extend(
+                process_item_pool(pos_items, offer_str, chunk_size, paid_count, discount_val, is_percentage)
+            )
+
+        pos_leftovers.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+        k_branch = len(pos_leftovers) // chunk_size
+        final_orphans = pos_leftovers[k_branch * chunk_size:]
+
+        for b_idx in range(k_branch):
+            bundle = pos_leftovers[b_idx * chunk_size: (b_idx + 1) * chunk_size]
+            add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+
+        while len(final_orphans) >= 2:
+            bundle = final_orphans[:2]
+            final_orphans = final_orphans[2:]
+            add_pair_bundle(offer_str, bundle)
+
+        for item in final_orphans:
+            r = item.copy()
+            r['Sls Discount EGP'] = 0.00
+            r['Net Sales EGP'] = float(r['Gross Sales EGP'])
+            true_unprocessed.append(r)
+
+    def sweep_unprocessed_receipt_pairs():
+        """Last pass: pair any same-POS orphans still sitting in Unprocessed."""
+        nonlocal true_unprocessed
+        pending = []
+        pair_groups = {}
+
+        for item in true_unprocessed:
+            offer_str = resolve_offer(mapping_lookup, item.get('Manufacturer Name'), 'Skip')
+            if offer_str == 'Skip':
+                pending.append(item)
+                continue
+            parsed = parse_offer_string(offer_str)
+            if not parsed:
+                pending.append(item)
+                continue
+
+            key = (
+                normalize_manufacturer_name(item.get('Manufacturer Name')),
+                item['Date'],
+                item['Site'],
+                str(item.get('POS no.', '101')).strip(),
+                offer_str,
+            )
+            pair_groups.setdefault(key, {'offer': offer_str, 'parsed': parsed, 'items': []})
+            pair_groups[key]['items'].append(item)
+
+        for group in pair_groups.values():
+            offer_str = group['offer']
+            chunk_size, paid_count, discount_val, is_percentage = group['parsed']
+            items = group['items']
+            items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+
+            k = len(items) // chunk_size
+            orphans = items[k * chunk_size:]
+            for b_idx in range(k):
+                bundle = items[b_idx * chunk_size: (b_idx + 1) * chunk_size]
+                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+
+            while len(orphans) >= 2:
+                bundle = orphans[:2]
+                orphans = orphans[2:]
+                add_pair_bundle(offer_str, bundle)
+
+            pending.extend(orphans)
+
+        true_unprocessed = pending
 
     def expand_transaction_items(trans_group):
         trans_items = []
@@ -331,50 +461,6 @@ def process_mix_match(
                 item['Gross Sales EGP'] = unit_gross
                 trans_items.append(item)
         return trans_items
-
-    def process_leftover_pool(items, offer_str, chunk_size, paid_count, discount_val, is_percentage):
-        """Pair leftovers: same POS first, then branch-wide, then 1+50% emergency pairs."""
-        if not items:
-            return
-
-        items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-        branch_leftovers = []
-
-        pos_buckets = {}
-        for item in items:
-            pos_key = (
-                item['Date'],
-                item['Site'],
-                str(item.get('POS no.', '101')).strip(),
-            )
-            pos_buckets.setdefault(pos_key, []).append(item)
-
-        for pos_items in pos_buckets.values():
-            pos_items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-            k_pos = len(pos_items) // chunk_size
-            branch_leftovers.extend(pos_items[k_pos * chunk_size:])
-            for b_idx in range(k_pos):
-                bundle = pos_items[b_idx * chunk_size: (b_idx + 1) * chunk_size]
-                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
-
-        branch_leftovers.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-        k_branch = len(branch_leftovers) // chunk_size
-        final_orphans = branch_leftovers[k_branch * chunk_size:]
-
-        for b_idx in range(k_branch):
-            bundle = branch_leftovers[b_idx * chunk_size: (b_idx + 1) * chunk_size]
-            add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
-
-        while len(final_orphans) >= 2:
-            bundle = final_orphans[:2]
-            final_orphans = final_orphans[2:]
-            add_bundle("1+50%", bundle, 1, 0.5, True, is_native=False)
-
-        for item in final_orphans:
-            r = item.copy()
-            r['Sls Discount EGP'] = 0.00
-            r['Net Sales EGP'] = float(r['Gross Sales EGP'])
-            true_unprocessed.append(r)
 
     grouped = df.groupby('Manufacturer Name', dropna=False)
 
@@ -394,22 +480,23 @@ def process_mix_match(
         chunk_size, paid_count, discount_val, is_percentage = parsed_offer
         company_leftovers = []
 
-        # Phase 1: native bundles inside each transaction (still split by Transact. type)
-        for sale_type, type_group in group.groupby('Transact. type', dropna=False):
-            for (d_val, s_val, t_val), trans_group in type_group.groupby(['Date', 'Site', 'Trnsctn number']):
-                trans_items = expand_transaction_items(trans_group)
-                trans_items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-                k = len(trans_items) // chunk_size
-                company_leftovers.extend(trans_items[k * chunk_size:])
-                for b_idx in range(k):
-                    bundle = trans_items[b_idx * chunk_size: (b_idx + 1) * chunk_size]
-                    is_native = (b_idx == 0)
-                    add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=is_native)
+        # Phase 1: native bundles inside each transaction (all Transact. types combined)
+        for (d_val, s_val, t_val), trans_group in group.groupby(['Date', 'Site', 'Trnsctn number']):
+            trans_items = expand_transaction_items(trans_group)
+            trans_items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
+            k = len(trans_items) // chunk_size
+            company_leftovers.extend(trans_items[k * chunk_size:])
+            for b_idx in range(k):
+                bundle = trans_items[b_idx * chunk_size: (b_idx + 1) * chunk_size]
+                is_native = (b_idx == 0)
+                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=is_native)
 
-        # Phase 2: merge all leftovers across Transact. types, pair same POS first
+        # Phase 2: pair leftovers on same receipt / same POS register
         process_leftover_pool(
             company_leftovers, offer_str, chunk_size, paid_count, discount_val, is_percentage
         )
+
+    sweep_unprocessed_receipt_pairs()
 
     return processed_data, true_unprocessed, accumulated_discount
 
