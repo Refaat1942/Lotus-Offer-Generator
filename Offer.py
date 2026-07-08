@@ -4,8 +4,7 @@ from tkinter import filedialog, messagebox, simpledialog
 from tkcalendar import DateEntry
 import pandas as pd
 from datetime import datetime, timedelta
-from openpyxl.styles import Font
-from offer_engine import _filter_unprocessed_export
+from offer_engine import export_to_excel, process_mix_match
 import os
 import sys
 import hashlib
@@ -281,27 +280,6 @@ class LotusOfferGenerator:
         self.company_checkbox_vars.clear()
         ctk.CTkLabel(self.scroll_mapping, text="Upload an Excel/CSV file to load companies here.", text_color="gray").pack(pady=20)
 
-    def parse_offer_string(self, offer_str):
-        offer_str = offer_str.replace(" ", "")
-        try:
-            if '+' in offer_str:
-                parts = offer_str.split('+')
-                if '%' in parts[1]:
-                    x = int(parts[0])
-                    pct = float(parts[1].replace('%', '')) / 100.0
-                    return (x + 1, x, pct, True)
-                else:
-                    x = int(parts[0])
-                    y = int(parts[1])
-                    return (x + y, x, 1.0, False)
-            elif '%' in offer_str:
-                pct = float(offer_str.replace('%', '')) / 100.0
-                return (2, 1, min(pct * 2, 1.0), True)
-            else:
-                return None
-        except:
-            return None
-
     def process_data(self):
         input_file = self.filepath.get()
         if not input_file:
@@ -357,291 +335,17 @@ class LotusOfferGenerator:
         else:
             start_date = None
             end_date = None
-            
-        site_date_trans_info = {}
-        for (d, s), group in df_original.groupby(['Date', 'Site']):
-            nums = pd.to_numeric(group['Trnsctn number'], errors='coerce').dropna().astype(int)
-            if not nums.empty:
-                t_min, t_max = nums.min(), nums.max()
-                if t_max - t_min < 100000:
-                    t_set = set(nums)
-                    missing = sorted(list(set(range(t_min, t_max + 1)) - t_set))
-                else:
-                    missing = []
-                site_date_trans_info[(d, s)] = {'missing': missing, 'max': t_max}
-            else:
-                site_date_trans_info[(d, s)] = {'missing': [], 'max': 1000}
 
-        def get_new_t_num(date_v, site_v):
-            info = site_date_trans_info.get((date_v, site_v), {'missing': [], 'max': 1000})
-            if info['missing']:
-                new_val = info['missing'].pop(0)
-            else:
-                info['max'] += 1
-                new_val = info['max']
-            site_date_trans_info[(date_v, site_v)] = info
-            return str(new_val)
-
-        if target_branch != "All":
-            df = df[df['Site'].str.strip() == target_branch.strip()]
-        if use_date_filter:
-            df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
-
-        processed_data = {} 
-        true_unprocessed = []
-        accumulated_discount = 0.0
-
-        def bundle_shares_same_register(bundle):
-            if not bundle:
-                return False
-            lead = bundle[0]
-            reg_date = lead['Date']
-            reg_site = lead['Site']
-            reg_pos = str(lead.get('POS no.', '101')).strip()
-            return all(
-                item['Date'] == reg_date
-                and item['Site'] == reg_site
-                and str(item.get('POS no.', '101')).strip() == reg_pos
-                for item in bundle
-            )
-
-        def unified_receipt_fields(bundle):
-            lead = bundle[0]
-            reg_date = lead['Date']
-            reg_site = lead['Site']
-            reg_pos = str(lead.get('POS no.', '101')).strip()
-            reg_time = str(lead.get('Time', '12:00:00 PM')).strip()
-            reg_t_num = str(lead.get('Trnsctn number', '')).strip()
-
-            if bundle_shares_same_register(bundle):
-                return reg_date, reg_site, reg_pos, reg_time, reg_t_num, False
-
-            new_t_num = str(get_new_t_num(reg_date, reg_site))
-            return reg_date, reg_site, reg_pos, reg_time, new_t_num, True
-
-        def add_bundle(offer_name, bundle, p_count, d_val, pct_flag, is_native=False):
-            nonlocal accumulated_discount
-            
-            bundle.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-            p_items = bundle[:p_count]
-            d_items = bundle[p_count:]
-            
-            pot_disc = 0.0
-            for item in d_items:
-                price = float(item['Gross Sales EGP'])
-                pot_disc += round(price * d_val, 2) if pct_flag else price
-                
-            apply_disc = (accumulated_discount + pot_disc <= target_discount) or (target_discount == float('inf'))
-            if apply_disc:
-                accumulated_discount += pot_disc
-                
-            if is_native:
-                for is_discounted, items_subset in [(False, p_items), (True, d_items)]:
-                    for item in items_subset:
-                        r = item.copy()
-                        r['Is_New_Trans'] = False
-                        r['offers Company'] = offer_name
-                        price = float(r['Gross Sales EGP'])
-                        if is_discounted and apply_disc:
-                            item_disc = round(price * d_val, 2) if pct_flag else price
-                            r['Sls Discount EGP'] = -item_disc
-                            r['Net Sales EGP'] = price - item_disc
-                        else:
-                            r['Sls Discount EGP'] = 0.00
-                            r['Net Sales EGP'] = price
-                        processed_data.setdefault(offer_name, []).append(r)
-            else:
-                u_date, u_site, u_pos, u_time, u_t_num, is_new_trans = unified_receipt_fields(bundle)
-
-                for is_discounted, items_subset in [(False, p_items), (True, d_items)]:
-                    for item in items_subset:
-                        r = item.copy()
-                        r['Date'] = u_date
-                        r['Site'] = u_site
-                        r['POS no.'] = u_pos
-                        r['Time'] = u_time
-                        r['Trnsctn number'] = u_t_num
-                        r['Is_New_Trans'] = is_new_trans
-                        r['offers Company'] = offer_name
-                        
-                        price = float(r['Gross Sales EGP'])
-                        if is_discounted and apply_disc:
-                            item_disc = round(price * d_val, 2) if pct_flag else price
-                            r['Sls Discount EGP'] = -item_disc
-                            r['Net Sales EGP'] = price - item_disc
-                        else:
-                            r['Sls Discount EGP'] = 0.00
-                            r['Net Sales EGP'] = price
-                        
-                        processed_data.setdefault(offer_name, []).append(r)
-
-        def add_pair_bundle(offer_str, bundle):
-            parsed = self.parse_offer_string(offer_str)
-            if parsed and parsed[0] == 2:
-                _, paid_count, discount_val, is_percentage = parsed
-                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
-            else:
-                add_bundle("1+50%", bundle, 1, 0.5, True, is_native=False)
-
-        def expand_transaction_items(trans_group):
-            trans_items = []
-            for _, row in trans_group.iterrows():
-                qty = float(str(row.get('Trnsctn: Sales SUn', 0)).replace(',', '').strip() or 0)
-                if qty <= 0:
-                    true_unprocessed.append(row.to_dict())
-                    continue
-                unit_gross = round(float(str(row.get('Gross Sales EGP', 0)).replace(',', '').strip() or 0) / qty, 2)
-                for _ in range(int(qty)):
-                    item = row.to_dict()
-                    item['Trnsctn: Sales SUn'] = 1.0
-                    item['Gross Sales EGP'] = unit_gross
-                    trans_items.append(item)
-            return trans_items
-
-        def bucket_items(items, key_fn):
-            buckets = {}
-            for item in items:
-                buckets.setdefault(key_fn(item), []).append(item)
-            return buckets
-
-        def process_item_pool(items, offer_str, chunk_size, paid_count, discount_val, is_percentage):
-            if not items:
-                return []
-            items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-            k = len(items) // chunk_size
-            orphans = items[k * chunk_size:]
-            for b_idx in range(k):
-                bundle = items[b_idx * chunk_size : (b_idx + 1) * chunk_size]
-                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
-            return orphans
-
-        def process_leftover_pool(items, offer_str, chunk_size, paid_count, discount_val, is_percentage):
-            if not items:
-                return
-
-            branch_leftovers = []
-            for receipt_items in bucket_items(
-                items,
-                lambda it: (
-                    it['Date'], it['Site'],
-                    str(it.get('POS no.', '101')).strip(),
-                    str(it.get('Trnsctn number', '')).strip(),
-                ),
-            ).values():
-                branch_leftovers.extend(
-                    process_item_pool(receipt_items, offer_str, chunk_size, paid_count, discount_val, is_percentage)
-                )
-
-            pos_leftovers = []
-            for pos_items in bucket_items(
-                branch_leftovers,
-                lambda it: (it['Date'], it['Site'], str(it.get('POS no.', '101')).strip()),
-            ).values():
-                pos_leftovers.extend(
-                    process_item_pool(pos_items, offer_str, chunk_size, paid_count, discount_val, is_percentage)
-                )
-
-            pos_leftovers.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-            k_branch = len(pos_leftovers) // chunk_size
-            final_orphans = pos_leftovers[k_branch * chunk_size:]
-
-            for b_idx in range(k_branch):
-                bundle = pos_leftovers[b_idx * chunk_size : (b_idx + 1) * chunk_size]
-                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
-
-            while len(final_orphans) >= 2:
-                bundle = final_orphans[:2]
-                final_orphans = final_orphans[2:]
-                add_pair_bundle(offer_str, bundle)
-
-            # Single leftovers omitted — would duplicate qty in export
-
-        def sweep_unprocessed_receipt_pairs():
-            nonlocal true_unprocessed
-            pending = []
-            pair_groups = {}
-
-            for item in true_unprocessed:
-                comp_key = str(item.get('Manufacturer Name', '')).strip()
-                offer_str = self.company_mappings.get(comp_key, ctk.StringVar(value="Skip")).get()
-                if offer_str == "Skip":
-                    pending.append(item)
-                    continue
-                parsed = self.parse_offer_string(offer_str)
-                if not parsed:
-                    pending.append(item)
-                    continue
-
-                key = (
-                    comp_key,
-                    item['Date'],
-                    item['Site'],
-                    str(item.get('POS no.', '101')).strip(),
-                    offer_str,
-                )
-                pair_groups.setdefault(key, {'offer': offer_str, 'parsed': parsed, 'items': []})
-                pair_groups[key]['items'].append(item)
-
-            for group in pair_groups.values():
-                offer_str = group['offer']
-                chunk_size, paid_count, discount_val, is_percentage = group['parsed']
-                items = group['items']
-                items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-
-                k = len(items) // chunk_size
-                orphans = items[k * chunk_size:]
-                for b_idx in range(k):
-                    bundle = items[b_idx * chunk_size : (b_idx + 1) * chunk_size]
-                    add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
-
-                while len(orphans) >= 2:
-                    bundle = orphans[:2]
-                    orphans = orphans[2:]
-                    add_pair_bundle(offer_str, bundle)
-
-                for item in orphans:
-                    comp_key = str(item.get('Manufacturer Name', '')).strip()
-                    offer_for_item = self.company_mappings.get(comp_key, ctk.StringVar(value="Skip")).get()
-                    if offer_for_item == "Skip" or not self.parse_offer_string(offer_for_item):
-                        pending.append(item)
-
-            true_unprocessed = pending
-
-        grouped = df.groupby('Manufacturer Name', dropna=False)
-
-        for comp_val, group in grouped:
-            comp_val_str = str(comp_val).strip()
-            offer_str = self.company_mappings.get(comp_val_str, ctk.StringVar(value="Skip")).get()
-
-            if offer_str == "Skip":
-                true_unprocessed.extend(group.to_dict('records'))
-                continue
-
-            parsed_offer = self.parse_offer_string(offer_str)
-            if not parsed_offer:
-                true_unprocessed.extend(group.to_dict('records'))
-                continue
-                
-            chunk_size, paid_count, discount_val, is_percentage = parsed_offer
-            company_leftovers = []
-
-            for (d_val, s_val, t_val), trans_group in group.groupby(['Date', 'Site', 'Trnsctn number']):
-                trans_items = expand_transaction_items(trans_group)
-                trans_items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
-                k = len(trans_items) // chunk_size
-                company_leftovers.extend(trans_items[k * chunk_size:])
-                for b_idx in range(k):
-                    bundle = trans_items[b_idx * chunk_size : (b_idx + 1) * chunk_size]
-                    is_native = (b_idx == 0)
-                    add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=is_native)
-
-            process_leftover_pool(
-                company_leftovers, offer_str, chunk_size, paid_count, discount_val, is_percentage
-            )
-
-        sweep_unprocessed_receipt_pairs()
-
-        true_unprocessed = _filter_unprocessed_export(true_unprocessed, processed_data)
+        company_mappings = {comp: var.get() for comp, var in self.company_mappings.items()}
+        processed_data, true_unprocessed, accumulated_discount = process_mix_match(
+            df_original,
+            company_mappings,
+            target_branch=target_branch,
+            use_date_filter=use_date_filter,
+            start_date=start_date,
+            end_date=end_date,
+            target_discount=target_discount,
+        )
 
         total_processed = sum(len(lst) for lst in processed_data.values())
         if total_processed == 0 and not true_unprocessed:
@@ -656,30 +360,9 @@ class LotusOfferGenerator:
         )
 
         if save_path:
-            bold_blue_font = Font(bold=True, color="0000FF")
-            
-            with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
-                for offer_name, rows_list in processed_data.items():
-                    if rows_list:
-                        df_proc = pd.DataFrame(rows_list)
-                        final_cols = [col for col in self.template_columns if col in df_proc.columns]
-                        safe_sheet_name = f'Offer_{offer_name}'.replace('%', 'pct') 
-                        df_proc[final_cols].to_excel(writer, index=False, sheet_name=safe_sheet_name)
-                        
-                        worksheet = writer.sheets[safe_sheet_name]
-                        if 'Trnsctn number' in final_cols:
-                            t_num_idx = final_cols.index('Trnsctn number') + 1
-                            is_new_list = df_proc.get('Is_New_Trans', [False] * len(df_proc)).tolist()
-                            
-                            for row_idx, is_new in enumerate(is_new_list, start=2): 
-                                if is_new:
-                                    worksheet.cell(row=row_idx, column=t_num_idx).font = bold_blue_font
-
-                if true_unprocessed:
-                    df_unp = pd.DataFrame(_filter_unprocessed_export(true_unprocessed, processed_data))
-                    if not df_unp.empty:
-                        final_cols_unp = [col for col in self.template_columns if col in df_unp.columns]
-                        df_unp[final_cols_unp].to_excel(writer, index=False, sheet_name='Unprocessed')
+            excel_bytes = export_to_excel(processed_data, true_unprocessed)
+            with open(save_path, 'wb') as out:
+                out.write(excel_bytes)
 
             target_display = target_str if target_str else "No Limit"
             msg = (f"🎉 Mix & Match Exported Successfully!\n\n"

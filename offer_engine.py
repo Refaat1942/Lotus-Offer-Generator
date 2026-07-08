@@ -29,6 +29,16 @@ DEFAULT_OFFERS = ["Skip", "1+50%", "1+1", "2+1", "10%", "20%"]
 
 
 def parse_offer_string(offer_str):
+    """
+    Parse company offer from the process page.
+
+    Returns:
+      ('pair', chunk_size, paid_count, discount_val, is_percentage)
+          Mix & match: 1+50%, 1+1, 2+1, 1+40% → two lines per bundle
+      ('direct', discount_pct)
+          Straight discount: 10%, 20% → discount on the same line
+      None if invalid
+    """
     offer_str = offer_str.replace(" ", "")
     try:
         if '+' in offer_str:
@@ -36,18 +46,30 @@ def parse_offer_string(offer_str):
             if '%' in parts[1]:
                 x = int(parts[0])
                 pct = float(parts[1].replace('%', '')) / 100.0
-                return (x + 1, x, pct, True)
-            else:
-                x = int(parts[0])
-                y = int(parts[1])
-                return (x + y, x, 1.0, False)
-        elif '%' in offer_str:
+                return ('pair', x + 1, x, pct, True)
+            x = int(parts[0])
+            y = int(parts[1])
+            return ('pair', x + y, x, 1.0, False)
+        if '%' in offer_str:
             pct = float(offer_str.replace('%', '')) / 100.0
-            return (2, 1, min(pct * 2, 1.0), True)
-        else:
-            return None
+            return ('direct', pct)
+        return None
     except Exception:
         return None
+
+
+def is_pair_offer(parsed):
+    return bool(parsed and parsed[0] == 'pair')
+
+
+def is_direct_offer(parsed):
+    return bool(parsed and parsed[0] == 'direct')
+
+
+def unpack_pair_offer(parsed):
+    if not is_pair_offer(parsed):
+        return None
+    return parsed[1], parsed[2], parsed[3], parsed[4]
 
 
 def normalize_manufacturer_name(name):
@@ -333,7 +355,8 @@ def process_mix_match(
                     r['Net Sales EGP'] = price
                 processed_data.setdefault(offer_name, []).append(r)
 
-    def add_bundle(offer_name, bundle, p_count, d_val, pct_flag, is_native=False):
+    def add_bundle(offer_name, bundle, p_count, d_val, pct_flag):
+        """Mix & match bundle → exactly len(bundle) lines, same receipt on each line."""
         nonlocal accumulated_discount
         bundle.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
         p_items = bundle[:p_count]
@@ -348,26 +371,44 @@ def process_mix_match(
         if apply_disc:
             accumulated_discount += pot_disc
 
-        if is_native:
-            write_bundle_rows(
-                offer_name, bundle, p_items, d_items, apply_disc, d_val, pct_flag,
-                is_new_trans=False, align_fields=False,
-            )
-        else:
-            u_date, u_site, u_pos, u_time, u_t_num, is_new_trans = unified_receipt_fields(bundle)
-            write_bundle_rows(
-                offer_name, bundle, p_items, d_items, apply_disc, d_val, pct_flag,
-                u_date, u_site, u_pos, u_time, u_t_num, is_new_trans, align_fields=True,
-            )
+        u_date, u_site, u_pos, u_time, u_t_num, is_new_trans = unified_receipt_fields(bundle)
+        write_bundle_rows(
+            offer_name, bundle, p_items, d_items, apply_disc, d_val, pct_flag,
+            u_date, u_site, u_pos, u_time, u_t_num, is_new_trans, align_fields=True,
+        )
 
     def add_pair_bundle(offer_str, bundle):
-        """Pair exactly 2 leftover items using the mapped company offer (e.g. 1+50%)."""
+        """Pair exactly 2 items using the mapped mix & match offer."""
         parsed = parse_offer_string(offer_str)
-        if parsed and parsed[0] == 2:
-            _, paid_count, discount_val, is_percentage = parsed
-            add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
-        else:
-            add_bundle('1+50%', bundle, 1, 0.5, True, is_native=False)
+        pair = unpack_pair_offer(parsed)
+        if pair and len(bundle) >= 2:
+            chunk_size, paid_count, discount_val, is_percentage = pair
+            add_bundle(offer_str, bundle[:chunk_size], paid_count, discount_val, is_percentage)
+        elif len(bundle) >= 2:
+            add_bundle('1+50%', bundle[:2], 1, 0.5, True)
+
+    def process_direct_discount(group, offer_str, discount_pct):
+        """10% / 20% — one output line per source row, discount on same line."""
+        nonlocal accumulated_discount
+        for _, row in group.iterrows():
+            r = row.to_dict()
+            qty = float(str(r.get('Trnsctn: Sales SUn', 0)).replace(',', '').strip() or 0)
+            if qty <= 0:
+                true_unprocessed.append(r)
+                continue
+            price = float(str(r.get('Gross Sales EGP', 0)).replace(',', '').strip() or 0)
+            pot_disc = round(price * discount_pct, 2)
+            apply_disc = (accumulated_discount + pot_disc <= target_discount) or (target_discount == float('inf'))
+            r['offers Company'] = offer_str
+            r['Is_New_Trans'] = False
+            if apply_disc:
+                r['Sls Discount EGP'] = -pot_disc
+                r['Net Sales EGP'] = round(price - pot_disc, 2)
+                accumulated_discount += pot_disc
+            else:
+                r['Sls Discount EGP'] = 0.00
+                r['Net Sales EGP'] = price
+            processed_data.setdefault(offer_str, []).append(r)
 
     def bucket_items(items, key_fn):
         buckets = {}
@@ -385,7 +426,7 @@ def process_mix_match(
         orphans = items[k * chunk_size:]
         for b_idx in range(k):
             bundle = items[b_idx * chunk_size: (b_idx + 1) * chunk_size]
-            add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+            add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage)
         return orphans
 
     def process_leftover_pool(items, offer_str, chunk_size, paid_count, discount_val, is_percentage):
@@ -424,7 +465,7 @@ def process_mix_match(
 
         for b_idx in range(k_branch):
             bundle = pos_leftovers[b_idx * chunk_size: (b_idx + 1) * chunk_size]
-            add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+            add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage)
 
         while len(final_orphans) >= 2:
             bundle = final_orphans[:2]
@@ -445,7 +486,7 @@ def process_mix_match(
                 pending.append(item)
                 continue
             parsed = parse_offer_string(offer_str)
-            if not parsed:
+            if not is_pair_offer(parsed):
                 pending.append(item)
                 continue
 
@@ -461,7 +502,11 @@ def process_mix_match(
 
         for group in pair_groups.values():
             offer_str = group['offer']
-            chunk_size, paid_count, discount_val, is_percentage = group['parsed']
+            pair = unpack_pair_offer(group['parsed'])
+            if not pair:
+                pending.extend(group['items'])
+                continue
+            chunk_size, paid_count, discount_val, is_percentage = pair
             items = group['items']
             items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
 
@@ -469,7 +514,7 @@ def process_mix_match(
             orphans = items[k * chunk_size:]
             for b_idx in range(k):
                 bundle = items[b_idx * chunk_size: (b_idx + 1) * chunk_size]
-                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=False)
+                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage)
 
             while len(orphans) >= 2:
                 bundle = orphans[:2]
@@ -479,7 +524,8 @@ def process_mix_match(
             # Keep only Skip / invalid-offer singles; drop offer-mapped orphans
             for item in orphans:
                 offer_for_item = resolve_offer(mapping_lookup, item.get('Manufacturer Name'), 'Skip')
-                if offer_for_item == 'Skip' or not parse_offer_string(offer_for_item):
+                parsed_item = parse_offer_string(offer_for_item)
+                if offer_for_item == 'Skip' or not parsed_item:
                     pending.append(item)
 
         true_unprocessed = pending
@@ -516,10 +562,18 @@ def process_mix_match(
             true_unprocessed.extend(group.to_dict('records'))
             continue
 
-        chunk_size, paid_count, discount_val, is_percentage = parsed_offer
+        if is_direct_offer(parsed_offer):
+            process_direct_discount(group, offer_str, parsed_offer[1])
+            continue
+
+        pair = unpack_pair_offer(parsed_offer)
+        if not pair:
+            true_unprocessed.extend(group.to_dict('records'))
+            continue
+        chunk_size, paid_count, discount_val, is_percentage = pair
         company_leftovers = []
 
-        # Phase 1: native bundles inside each transaction (all Transact. types combined)
+        # Phase 1: pair inside each transaction first
         for (d_val, s_val, t_val), trans_group in group.groupby(['Date', 'Site', 'Trnsctn number']):
             trans_items = expand_transaction_items(trans_group)
             trans_items.sort(key=lambda x: float(x['Gross Sales EGP']), reverse=True)
@@ -527,8 +581,7 @@ def process_mix_match(
             company_leftovers.extend(trans_items[k * chunk_size:])
             for b_idx in range(k):
                 bundle = trans_items[b_idx * chunk_size: (b_idx + 1) * chunk_size]
-                is_native = (b_idx == 0)
-                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage, is_native=is_native)
+                add_bundle(offer_str, bundle, paid_count, discount_val, is_percentage)
 
         # Phase 2: pair leftovers on same receipt / same POS register
         process_leftover_pool(
